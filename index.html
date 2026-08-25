@@ -49,6 +49,18 @@
   .st-復習中 { background: #1d4ed8; }
   .st-習得済み { background: #15803d; }
   .list-wrap { width: 100%; max-width: 480px; max-height: 70vh; overflow-y: auto; }
+  .dir-toggle { display: flex; gap: 8px; width: 100%; max-width: 480px; margin-top: 4px; }
+  .dir-btn { flex: 1; padding: 8px; border-radius: 10px; background: #1e293b; text-align: center;
+    font-size: 13px; cursor: pointer; border: 1px solid #334155; color: #94a3b8; }
+  .dir-btn.active { background: #7c3aed; border-color: #7c3aed; color: white; }
+  .mic-btn { margin-top: 16px; width: 72px; height: 72px; border-radius: 50%; border: none;
+    background: #334155; font-size: 28px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
+  .mic-btn.listening { background: #dc2626; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.5); } 50% { box-shadow: 0 0 0 14px rgba(220,38,38,0); } }
+  .mic-wrap { display: flex; flex-direction: column; align-items: center; }
+  .mic-label { font-size: 12px; color: #64748b; margin-top: 8px; }
+  .transcript { margin-top: 12px; background: #0f172a; border: 1px dashed #475569; border-radius: 12px;
+    padding: 12px 16px; font-size: 16px; min-height: 24px; width: 100%; max-width: 480px; text-align: center; color: #fbbf24; }
 </style>
 </head>
 <body>
@@ -63,7 +75,19 @@
   <div class="tab" data-tab="list">📋 一覧</div>
 </div>
 
+<div class="dir-toggle" id="dirToggle">
+  <div class="dir-btn active" data-dir="en2ja">英→日</div>
+  <div class="dir-btn" data-dir="ja2en">日→英</div>
+</div>
+
 <div class="card-wrap" id="quizArea"></div>
+
+<div class="mic-wrap" id="micWrap" style="display:none;">
+  <button class="mic-btn" id="micBtn">🎤</button>
+  <div class="mic-label" id="micLabel">タップして英語で話す</div>
+</div>
+<div class="transcript" id="transcript" style="display:none;"></div>
+
 <div class="buttons" id="quizButtons" style="display:none;">
   <button class="btn btn-wrong" id="btnWrong">😵 わからない</button>
   <button class="btn btn-correct" id="btnCorrect">✅ わかった</button>
@@ -101,6 +125,60 @@ let currentTab = 'quiz';
 let currentCard = null;
 let revealed = false;
 let queue = [];
+let direction = 'en2ja'; // or 'ja2en'
+let recognition = null;
+let listening = false;
+
+function setupSpeechRecognition() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return null;
+  const r = new SR();
+  r.lang = 'en-US';
+  r.continuous = false;
+  r.interimResults = true;
+  return r;
+}
+
+function toggleMic() {
+  const transcriptEl = document.getElementById('transcript');
+  if (!recognition) {
+    recognition = setupSpeechRecognition();
+    if (!recognition) {
+      transcriptEl.style.display = 'block';
+      transcriptEl.textContent = 'この端末・ブラウザは音声入力に対応していません（テキストで確認してください）';
+      return;
+    }
+    recognition.onresult = (event) => {
+      let text = '';
+      for (let i = 0; i < event.results.length; i++) {
+        text += event.results[i][0].transcript;
+      }
+      transcriptEl.style.display = 'block';
+      transcriptEl.textContent = '🗣️ ' + text;
+    };
+    recognition.onend = () => {
+      listening = false;
+      document.getElementById('micBtn').classList.remove('listening');
+      document.getElementById('micLabel').textContent = 'タップして英語で話す';
+      // reveal answer + show judge buttons after speaking
+      revealAnswer();
+    };
+    recognition.onerror = () => {
+      listening = false;
+      document.getElementById('micBtn').classList.remove('listening');
+    };
+  }
+  if (listening) {
+    recognition.stop();
+  } else {
+    document.getElementById('transcript').style.display = 'none';
+    document.getElementById('transcript').textContent = '';
+    listening = true;
+    document.getElementById('micBtn').classList.add('listening');
+    document.getElementById('micLabel').textContent = '聞き取り中… もう一度タップで終了';
+    try { recognition.start(); } catch (e) {}
+  }
+}
 
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
@@ -150,33 +228,59 @@ function queueDueCount() {
   }).length;
 }
 
+function revealAnswer() {
+  if (!currentCard || revealed) return;
+  revealed = true;
+  const answerEl = document.getElementById('answerText');
+  const hintEl = document.getElementById('hintText');
+  if (answerEl) answerEl.style.display = 'block';
+  if (hintEl) hintEl.style.display = 'none';
+  document.getElementById('quizButtons').style.display = 'flex';
+}
+
 function renderCard() {
   const area = document.getElementById('quizArea');
   const btns = document.getElementById('quizButtons');
+  const micWrap = document.getElementById('micWrap');
+  const transcriptEl = document.getElementById('transcript');
+  transcriptEl.style.display = 'none';
+  transcriptEl.textContent = '';
+
   if (queue.length === 0) {
     area.innerHTML = `<div class="empty">🎉 今日の分は終わりました！<br>お疲れ様でした。</div>`;
     btns.style.display = 'none';
+    micWrap.style.display = 'none';
     document.getElementById('progressFill').style.width = '100%';
     return;
   }
   currentCard = queue[0];
   revealed = false;
   const p = progress[currentCard.id] || { status: '未学習', box: 0 };
+
+  const questionText = direction === 'en2ja' ? currentCard.en : currentCard.ja;
+  const answerText = direction === 'en2ja' ? currentCard.ja : currentCard.en;
+  const questionClass = direction === 'en2ja' ? 'en' : 'ja';
+  const answerClass = direction === 'en2ja' ? 'ja' : 'en';
+  const hint = direction === 'en2ja' ? 'タップして意味を表示' : 'タップして英語を表示（または🎤で発音）';
+
   area.innerHTML = `
     <div class="no-badge">No.${currentCard.id} ・ ${p.status}</div>
     <div class="card" id="flashcard">
-      <div class="en">${currentCard.en}</div>
-      <div class="ja" id="jaText" style="display:none;">${currentCard.ja}</div>
-      <div class="hint" id="hintText">タップして意味を表示</div>
+      <div class="${questionClass}">${questionText}</div>
+      <div class="${answerClass}" id="answerText" style="display:none;">${answerText}</div>
+      <div class="hint" id="hintText">${hint}</div>
     </div>
   `;
   btns.style.display = 'none';
-  document.getElementById('flashcard').onclick = () => {
-    revealed = true;
-    document.getElementById('jaText').style.display = 'block';
-    document.getElementById('hintText').style.display = 'none';
-    btns.style.display = 'flex';
-  };
+  document.getElementById('flashcard').onclick = () => revealAnswer();
+
+  if (direction === 'ja2en') {
+    micWrap.style.display = 'flex';
+    document.getElementById('micBtn').onclick = (e) => { e.stopPropagation(); toggleMic(); };
+  } else {
+    micWrap.style.display = 'none';
+  }
+
   const total = currentTab === 'quiz' ? queueDueCount() : CHUNKS.length;
   const remaining = queue.length;
   const done = total - remaining;
@@ -239,6 +343,13 @@ function switchTab(tab) {
 
 document.querySelectorAll('.tab').forEach(t => {
   t.addEventListener('click', () => switchTab(t.dataset.tab));
+});
+document.querySelectorAll('.dir-btn').forEach(b => {
+  b.addEventListener('click', () => {
+    direction = b.dataset.dir;
+    document.querySelectorAll('.dir-btn').forEach(x => x.classList.toggle('active', x === b));
+    if (currentTab !== 'list') renderCard();
+  });
 });
 document.getElementById('btnCorrect').addEventListener('click', () => markResult(true));
 document.getElementById('btnWrong').addEventListener('click', () => markResult(false));
