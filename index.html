@@ -171,6 +171,7 @@ function mdBoldToHtml(text) {
 
 const STORAGE_KEY = 'chunk_progress_v1';
 const INTERVALS = [1, 3, 7, 14, 30, 90]; // days
+const SESSION_SIZE = 15; // スタンフォード式：1セットあたりの出題数（集中して回せる量に区切る）
 
 function loadProgress() {
   try {
@@ -198,6 +199,10 @@ let recognition = null;
 let exampleIndex = 0;
 let exampleRevealed = false;
 let listening = false;
+let sessionExtra = [];   // 今日のセットに入りきらなかった残りの復習待ちチャンク
+let sessionMissed = [];  // このラウンドで「わからない」だったチャンク（次ラウンドで再出題）
+let sessionRound = 1;    // 現在のラウンド数（2以上＝間違えた分だけの再テスト）
+let sessionTotal = 0;    // 現在のラウンドの出題数（進捗バー計算用）
 
 function setupSpeechRecognition() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -269,24 +274,35 @@ function addDays(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
+function shuffleArray(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
 function buildQueue(mode) {
   const today = todayStr();
   if (mode === 'quiz') {
     // due for review: next_review <= today, or 未学習
-    queue = CHUNKS.filter(c => {
+    const due = CHUNKS.filter(c => {
       const p = progress[c.id];
       if (!p) return true;
       if (p.status === '未学習') return true;
       if (p.status === '習得済み') return false;
       return !p.next_review || p.next_review <= today;
     });
+    shuffleArray(due);
+    // スタンフォード式：一気に全部出すのではなく、集中して回せる量（1セット）に区切る
+    queue = due.slice(0, SESSION_SIZE);
+    sessionExtra = due.slice(SESSION_SIZE);
+    sessionMissed = [];
+    sessionRound = 1;
+    sessionTotal = queue.length;
   } else {
     queue = [...CHUNKS];
-  }
-  // shuffle
-  for (let i = queue.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [queue[i], queue[j]] = [queue[j], queue[i]];
+    shuffleArray(queue);
   }
 }
 
@@ -319,6 +335,21 @@ function renderCard() {
   micWrap.style.display = 'none';
 
   if (queue.length === 0) {
+    if (currentTab === 'quiz' && sessionExtra.length > 0) {
+      // このセットは間違えた分も含めて全部クリア。まだ続きの復習待ちがある場合は次セットへ
+      area.innerHTML = `<div class="empty">✅ このセット（${sessionTotal}問）はクリア！<br>まだ復習待ちが ${sessionExtra.length}問 あります。</div>`;
+      btns.style.display = 'flex';
+      btns.innerHTML = `<button class="btn btn-next" id="btnNextSet" style="width:100%;">次のセットへ →</button>`;
+      document.getElementById('btnNextSet').onclick = () => {
+        queue = sessionExtra.splice(0, SESSION_SIZE);
+        sessionMissed = [];
+        sessionRound = 1;
+        sessionTotal = queue.length;
+        renderCard();
+      };
+      document.getElementById('progressFill').style.width = '100%';
+      return;
+    }
     area.innerHTML = `<div class="empty">🎉 今日の分は終わりました！<br>お疲れ様でした。</div>`;
     btns.style.display = 'none';
     document.getElementById('progressFill').style.width = '100%';
@@ -337,31 +368,61 @@ function renderCard() {
   const exampleFrontHtml = example ? (direction === 'ja2en' ? example.ja : mdBoldToHtml(example.en)) : '';
   const exampleBackHtml = example ? (direction === 'ja2en' ? mdBoldToHtml(example.en) : example.ja) : '';
 
+  // 日→英モードのときだけ、声に出して答えるマイク入力を出す（自分で言えるか＝テスト効果を高める）
+  if (direction === 'ja2en' && (currentTab === 'quiz' || currentTab === 'random')) {
+    micWrap.style.display = 'flex';
+    document.getElementById('micLabel').textContent = 'タップして英語で話す';
+  }
+
   area.innerHTML = `
-    <div class="no-badge">No.${currentCard.id} ・ ${p.status}</div>
+    <div class="no-badge">No.${currentCard.id} ・ ${p.status}${currentTab === 'quiz' && sessionRound > 1 ? ` ・ 🔁 ラウンド${sessionRound}（間違えた分だけ再テスト）` : ''}</div>
     <div class="card" id="flashcard">
       <div class="quiz-chunk">${chunkFront}</div>
       <div class="quiz-chunk-ja" id="chunkJa" style="display:none;">${chunkBack}</div>
       ${example ? `<div class="quiz-sep"></div><div class="quiz-example">${exampleFrontHtml}</div><div class="quiz-example-ja" id="exampleJa" style="display:none;">${exampleBackHtml}</div>` : ''}
+      <div class="hint">タップ、または下のボタンで答えを表示</div>
     </div>
   `;
+  document.getElementById('flashcard').addEventListener('click', showAnswer);
   btns.style.display = 'flex';
-  btns.innerHTML = `
-    <button class="btn btn-wrong" id="btnWrong">😵 わからない</button>
-    <button class="btn btn-correct" id="btnCorrect">✅ わかった</button>
-  `;
-  document.getElementById('btnCorrect').onclick = () => markResult(true);
-  document.getElementById('btnWrong').onclick = () => markResult(false);
+  btns.innerHTML = `<button class="btn btn-next" id="btnReveal" style="width:100%;">👀 答えを見る</button>`;
+  document.getElementById('btnReveal').onclick = showAnswer;
 
-  const total = currentTab === 'quiz' ? queueDueCount() : CHUNKS.length;
+  const total = currentTab === 'quiz' ? sessionTotal : CHUNKS.length;
   const remaining = queue.length;
   const done = total - remaining;
   document.getElementById('progressFill').style.width = `${total ? (done/total*100) : 0}%`;
 }
 
+function showAnswer() {
+  if (!currentCard || cardAnswered) return;
+  // 答え（英語/日本語訳）を表示してから、自分で「わかった/わからない」を判定してもらう
+  const chunkJaEl = document.getElementById('chunkJa');
+  const exampleJaEl = document.getElementById('exampleJa');
+  if (chunkJaEl) chunkJaEl.style.display = 'block';
+  if (exampleJaEl) exampleJaEl.style.display = 'block';
+
+  const btns = document.getElementById('quizButtons');
+  btns.innerHTML = `
+    <button class="btn btn-wrong" id="btnWrong">😵 わからなかった</button>
+    <button class="btn btn-correct" id="btnCorrect">✅ わかった</button>
+  `;
+  document.getElementById('btnCorrect').onclick = () => markResult(true);
+  document.getElementById('btnWrong').onclick = () => markResult(false);
+}
+
+function revealAnswer() {
+  // マイクで話し終わったときに呼ばれる。答えを表示して、認識結果と見比べて自分で判定してもらう
+  showAnswer();
+}
+
 function markResult(correct) {
   if (!currentCard || cardAnswered) return;
   cardAnswered = true;
+  if (!correct && currentTab === 'quiz') {
+    // このラウンドで間違えたものは、今セットの最後にもう一度出題する
+    sessionMissed.push(currentCard);
+  }
   const p = progress[currentCard.id] || { status: '未学習', review_count: 0, box: 0 };
   p.review_count = (p.review_count || 0) + 1;
   p.last_reviewed = todayStr();
@@ -378,19 +439,26 @@ function markResult(correct) {
   saveProgress(progress);
   updateStats();
 
-  // Reveal Japanese translations for both chunk and example
-  const chunkJaEl = document.getElementById('chunkJa');
-  const exampleJaEl = document.getElementById('exampleJa');
-  if (chunkJaEl) chunkJaEl.style.display = 'block';
-  if (exampleJaEl) exampleJaEl.style.display = 'block';
+  // 回答済みになったらマイクは一旦しまう（次のカードでまた必要なら表示される）
+  if (listening && recognition) { try { recognition.stop(); } catch (e) {} }
+  document.getElementById('micWrap').style.display = 'none';
 
   // Replace buttons with a single "next" button
   const btns = document.getElementById('quizButtons');
   btns.innerHTML = `<button class="btn btn-next" id="btnNextCard" style="width:100%;">次へ →</button>`;
-  document.getElementById('btnNextCard').onclick = () => {
-    queue.shift();
-    renderCard();
-  };
+  document.getElementById('btnNextCard').onclick = nextCard;
+}
+
+function nextCard() {
+  queue.shift();
+  if (currentTab === 'quiz' && queue.length === 0 && sessionMissed.length > 0) {
+    // このセットの1周目（または前ラウンド）が終わったら、間違えたものだけで次ラウンドへ
+    queue = shuffleArray(sessionMissed);
+    sessionMissed = [];
+    sessionRound++;
+    sessionTotal = queue.length;
+  }
+  renderCard();
 }
 
 function renderList() {
@@ -582,14 +650,11 @@ document.querySelectorAll('.dir-btn').forEach(b => {
 
 function restoreQuizButtons() {
   const btns = document.getElementById('quizButtons');
-  btns.innerHTML = `
-    <button class="btn btn-wrong" id="btnWrong">😵 わからない</button>
-    <button class="btn btn-correct" id="btnCorrect">✅ わかった</button>
-  `;
-  document.getElementById('btnCorrect').addEventListener('click', () => markResult(true));
-  document.getElementById('btnWrong').addEventListener('click', () => markResult(false));
+  btns.innerHTML = `<button class="btn btn-next" id="btnReveal" style="width:100%;">👀 答えを見る</button>`;
+  document.getElementById('btnReveal').addEventListener('click', showAnswer);
 }
 restoreQuizButtons();
+document.getElementById('micBtn').addEventListener('click', toggleMic);
 document.getElementById('resetBtn').addEventListener('click', () => {
   if (confirm('本当に全ての学習進捗をリセットしますか？')) {
     localStorage.removeItem(STORAGE_KEY);
