@@ -274,14 +274,6 @@ function addDays(dateStr, days) {
   return d.toISOString().slice(0, 10);
 }
 
-function shuffleArray(arr) {
-  for (let i = arr.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]];
-  }
-  return arr;
-}
-
 function buildQueue(mode) {
   const today = todayStr();
   if (mode === 'quiz') {
@@ -293,7 +285,7 @@ function buildQueue(mode) {
       if (p.status === '習得済み') return false;
       return !p.next_review || p.next_review <= today;
     });
-    shuffleArray(due);
+    // 本と照らし合わせやすいよう、シャッフルせず番号順のまま出題する
     // スタンフォード式：一気に全部出すのではなく、集中して回せる量（1セット）に区切る
     queue = due.slice(0, SESSION_SIZE);
     sessionExtra = due.slice(SESSION_SIZE);
@@ -302,8 +294,11 @@ function buildQueue(mode) {
     sessionTotal = queue.length;
   } else {
     queue = [...CHUNKS];
-    shuffleArray(queue);
   }
+}
+
+function sortById(arr) {
+  return arr.sort((a, b) => a.id - b.id);
 }
 
 function updateStats() {
@@ -453,7 +448,7 @@ function nextCard() {
   queue.shift();
   if (currentTab === 'quiz' && queue.length === 0 && sessionMissed.length > 0) {
     // このセットの1周目（または前ラウンド）が終わったら、間違えたものだけで次ラウンドへ
-    queue = shuffleArray(sessionMissed);
+    queue = sortById(sessionMissed);
     sessionMissed = [];
     sessionRound++;
     sessionTotal = queue.length;
